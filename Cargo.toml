@@ -1,0 +1,12 @@
+[package]
+name = "konaste_downloader"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+tokio = { version = "1", features = ["full"] }
+reqwest = "0.12"
+serde = { version = "1.0", features = ["derive"] }
+quick-xml = { version = "0.38", features = ["serialize"] }
+clap = { version = "4", features = ["derive"] }
