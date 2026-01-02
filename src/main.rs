@@ -1,7 +1,9 @@
 use anyhow::Result;
 use clap::Parser;
+use kbinxml;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -30,9 +32,14 @@ async fn main() -> Result<()> {
 
     let resource_info: ResourceInfo = {
         let response = client.get(&args.url).send().await?;
-        let body = response.text().await?;
 
-        quick_xml::de::from_str(&body)?
+        let body = response.bytes().await?;
+        let body = match kbinxml::from_binary(body.clone().into()) {
+            Ok((nodes, _)) => kbinxml::to_text_xml(&nodes)?,
+            Err(_) => body.into(),
+        };
+
+        quick_xml::de::from_reader(body.as_slice())?
     };
 
     #[derive(Default)]
@@ -59,13 +66,29 @@ async fn main() -> Result<()> {
 
         let handle = tokio::spawn(async move {
             let file_path = std::path::Path::new(&output_path).join(&file.path);
+
+            // Check if file exists and verify hash
             if file_path.exists() {
-                // Count existing files as already done for progress reporting
-                let done = status.downloaded_files.fetch_add(1, Ordering::SeqCst) + 1;
-                let done_bytes = status.downloaded_bytes.fetch_add(file.size as usize, Ordering::SeqCst) + (file.size as usize);
-                let pct = (done_bytes as f64 / total_len as f64) * 100.0;
-                println!("Progress: {}/{} files downloaded ({}%)", done, total, pct);
-                return Ok(());
+                if let Ok(existing_data) = tokio::fs::read(&file_path).await {
+                    let mut hasher = Sha256::new();
+                    hasher.update(&existing_data);
+                    let hash = format!("{:x}", hasher.finalize());
+
+                    // If hash matches, skip download
+                    if hash == file.sum {
+                        let done = status.downloaded_files.fetch_add(1, Ordering::SeqCst) + 1;
+                        let done_bytes = status
+                            .downloaded_bytes
+                            .fetch_add(file.size as usize, Ordering::SeqCst)
+                            + (file.size as usize);
+                        let pct = (done_bytes as f64 / total_len as f64) * 100.0;
+                        println!(
+                            "Skipped (unchanged): {} - Progress: {}/{} files ({}%)",
+                            file.path, done, total, pct
+                        );
+                        return Ok(());
+                    }
+                }
             }
 
             let _permit = permit; // Keep the permit alive for the duration of the download
@@ -79,9 +102,15 @@ async fn main() -> Result<()> {
 
             // Increment counter and print progress after successful download
             let done = status.downloaded_files.fetch_add(1, Ordering::SeqCst) + 1;
-            let done_bytes = status.downloaded_bytes.fetch_add(file.size as usize, Ordering::SeqCst) + (file.size as usize);
+            let done_bytes = status
+                .downloaded_bytes
+                .fetch_add(file.size as usize, Ordering::SeqCst)
+                + (file.size as usize);
             let pct = (done_bytes as f64 / total_len as f64) * 100.0;
-            println!("Progress: {}/{} files downloaded ({}%)", done, total, pct);
+            println!(
+                "Downloaded: {} - Progress: {}/{} files ({}%)",
+                file.path, done, total, pct
+            );
 
             Ok::<(), anyhow::Error>(())
         });
